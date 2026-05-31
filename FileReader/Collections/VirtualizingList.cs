@@ -20,7 +20,7 @@ namespace FileReader.Collections
         // メモリリーク防止のため、最大キャッシュ保持数を制限 (例: 5ページ分)
         private readonly Dictionary<int, List<Dictionary<string, string>>> _pageCache = new();
         private readonly Queue<int> _cacheOrder = new();
-        private const int MaxCachePages = 10;
+        private const int MaxCachePages = 50;
 
         public event NotifyCollectionChangedEventHandler? CollectionChanged;
         public event PropertyChangedEventHandler? PropertyChanged;

@@ -51,7 +51,7 @@ namespace FileReader.Services
 
             // SQLite高速化のための設定
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "PRAGMA synchronous = OFF; PRAGMA journal_mode = WAL; PRAGMA temp_store = MEMORY;";
+            cmd.CommandText = "PRAGMA synchronous = OFF; PRAGMA journal_mode = WAL; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -200000; PRAGMA mmap_size = 268435456;";
             cmd.ExecuteNonQuery();
         }
 
@@ -134,7 +134,7 @@ namespace FileReader.Services
 
                 // テーブル作成SQLの組み立て
                 var createTableSql = new StringBuilder();
-                createTableSql.Append("CREATE TABLE log_data (rowid INTEGER PRIMARY KEY AUTOINCREMENT");
+                createTableSql.Append("CREATE TABLE log_data (rowid INTEGER PRIMARY KEY");
                 foreach (var col in _columns)
                 {
                     createTableSql.Append($", [{col}] TEXT");
@@ -174,7 +174,7 @@ namespace FileReader.Services
                 SqliteTransaction transaction = _connection.BeginTransaction();
                 insertCmd.Transaction = transaction;
 
-                const int batchSize = 50000;
+                const int batchSize = 100000;
 
                 try
                 {
@@ -244,24 +244,19 @@ namespace FileReader.Services
 
         private void InsertRecord(CsvReader csv, SqliteCommand cmd, List<SqliteParameter> parameters)
         {
-            for (int i = 0; i < _columns.Count; i++)
+            int parseCount = csv.Parser.Count;
+            int limit = Math.Min(_columns.Count, parseCount);
+
+            for (int i = 0; i < limit; i++)
             {
-                string val = string.Empty;
-                try
-                {
-                    // カラム数が実データより多い場合などのエラーハンドリング
-                    if (i < csv.Parser.Count)
-                    {
-                        val = csv.GetField(i) ?? string.Empty;
-                    }
-                }
-                catch
-                {
-                    // エラーの場合は空白埋め（堅牢性）
-                    val = string.Empty;
-                }
-                parameters[i].Value = val;
+                parameters[i].Value = csv.GetField(i) ?? string.Empty;
             }
+
+            for (int i = limit; i < _columns.Count; i++)
+            {
+                parameters[i].Value = string.Empty;
+            }
+
             cmd.ExecuteNonQuery();
         }
 
