@@ -35,6 +35,9 @@ namespace FileReader.Services
         public string DbFilePath => _dbFilePath;
         public bool IsIndexed => _isIndexed;
 
+        // フィーチャーフラグ: Span<T>を用いた自作の高速パーサーを使用するか（CsvHelperの代替）
+        public bool UseFastSpanParser { get; set; } = true;
+
         public LogDatabase()
         {
             // 一時DBファイルのパスを作成
@@ -63,73 +66,82 @@ namespace FileReader.Services
                 long totalBytes = fileInfo.Length;
                 long processedBytes = 0;
 
-                // CsvHelper設定
-                var config = new CsvConfiguration(CultureInfo.InvariantCulture)
-                {
-                    Delimiter = format.Delimiter,
-                    HasHeaderRecord = format.HasHeader,
-                    BadDataFound = context =>
-                    {
-                        // 破損行エラーを検知してもスキップして継続
-                        Debug.WriteLine($"[Warning] Bad data found at: {context.RawRecord}");
-                    },
-                    MissingFieldFound = (args) =>
-                    {
-                        // フィールド不足も許容
-                    }
-                };
-
                 using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, useAsync: false);
-                // ストリームバイト数を監視するためのラッパー
-                using var progressStream = new ProgressReportingStream(fileStream, bytesRead =>
-                {
-                    processedBytes += bytesRead;
-                });
-
+                using var progressStream = new ProgressReportingStream(fileStream, bytesRead => { processedBytes += bytesRead; });
                 using var reader = new StreamReader(progressStream, Encoding.UTF8);
-                using var csv = new CsvReader(reader, config);
 
-                if (!csv.Read())
-                {
-                    throw new Exception("ファイルが空か、読み込み不可能です。");
-                }
+                _columns.Clear();
 
                 // ヘッダーまたはカラムの決定
-                _columns.Clear();
-                if (format.HasHeader)
+                if (UseFastSpanParser)
                 {
-                    csv.ReadHeader();
-                    string[]? headers = csv.HeaderRecord;
-                    if (headers != null)
+                    if (format.HasHeader)
                     {
-                        int emptyColIndex = 1;
-                        foreach (var header in headers)
+                        var headerLine = reader.ReadLine();
+                        if (headerLine != null)
                         {
-                            string colName = string.IsNullOrWhiteSpace(header) ? $"Column_{emptyColIndex++}" : header;
-                            // SQLiteのカラム名として安全な名前にサニタイズ
-                            colName = colName.Replace(" ", "_").Replace("-", "_").Replace(".", "_");
-                            _columns.Add(colName);
+                            var headers = headerLine.Split(new[] { format.Delimiter }, StringSplitOptions.None);
+                            int emptyColIndex = 1;
+                            foreach (var header in headers)
+                            {
+                                string colName = string.IsNullOrWhiteSpace(header) ? $"Column_{emptyColIndex++}" : header;
+                                colName = colName.Replace(" ", "_").Replace("-", "_").Replace(".", "_").Trim('"');
+                                _columns.Add(colName);
+                            }
                         }
                     }
-                }
-                
-                // ヘッダーがない、または取得できなかった場合
-                if (_columns.Count == 0)
-                {
-                    if (format.Columns != null && format.Columns.Count > 0)
+                    else if (format.Columns != null && format.Columns.Count > 0)
                     {
                         _columns.AddRange(format.Columns);
                     }
                     else
                     {
-                        // 1行目をパースしてカラム数を推測
-                        int fieldCount = csv.Parser.Count;
-                        if (fieldCount == 0) fieldCount = 10; // デフォルト
-                        for (int i = 1; i <= fieldCount; i++)
+                        for (int i = 1; i <= 10; i++) _columns.Add($"Column_{i}");
+                    }
+                }
+                else
+                {
+                    // 既存のCsvHelperを使ったヘッダー解析
+                    var config = new CsvConfiguration(CultureInfo.InvariantCulture)
+                    {
+                        Delimiter = format.Delimiter,
+                        HasHeaderRecord = format.HasHeader,
+                        BadDataFound = context => { },
+                        MissingFieldFound = args => { }
+                    };
+                    using var csv = new CsvReader(reader, config);
+                    if (!csv.Read()) throw new Exception("ファイルが空か、読み込み不可能です。");
+
+                    if (format.HasHeader)
+                    {
+                        csv.ReadHeader();
+                        string[]? headers = csv.HeaderRecord;
+                        if (headers != null)
                         {
-                            _columns.Add($"Column_{i}");
+                            int emptyColIndex = 1;
+                            foreach (var header in headers)
+                            {
+                                string colName = string.IsNullOrWhiteSpace(header) ? $"Column_{emptyColIndex++}" : header;
+                                colName = colName.Replace(" ", "_").Replace("-", "_").Replace(".", "_");
+                                _columns.Add(colName);
+                            }
                         }
                     }
+                    else if (format.Columns != null && format.Columns.Count > 0)
+                    {
+                        _columns.AddRange(format.Columns);
+                    }
+                    else
+                    {
+                        int fieldCount = csv.Parser.Count;
+                        if (fieldCount == 0) fieldCount = 10;
+                        for (int i = 1; i <= fieldCount; i++) _columns.Add($"Column_{i}");
+                    }
+
+                    // ヘッダーパース後にストリーム位置を元に戻す
+                    fileStream.Position = 0;
+                    processedBytes = 0;
+                    reader.DiscardBufferedData();
                 }
 
                 // テーブル作成SQLの組み立て
@@ -158,7 +170,6 @@ namespace FileReader.Services
                 using var insertCmd = _connection.CreateCommand();
                 insertCmd.CommandText = insertSql.ToString();
                 
-                // パラメータを事前に準備
                 var parameters = new List<SqliteParameter>();
                 foreach (var col in _columns)
                 {
@@ -178,42 +189,87 @@ namespace FileReader.Services
 
                 try
                 {
-                    // 最初のレコード（既にRead()したもの）を処理
-                    if (!format.HasHeader)
+                    if (UseFastSpanParser)
                     {
-                        InsertRecord(csv, insertCmd, parameters);
-                        rowCount++;
-                    }
-
-                    while (csv.Read())
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-
-                        InsertRecord(csv, insertCmd, parameters);
-                        rowCount++;
-
-                        if (rowCount % batchSize == 0)
+                        // ----- Span<T> ベースの超高速カスタムパーサー -----
+                        string? line;
+                        while ((line = reader.ReadLine()) != null)
                         {
-                            transaction.Commit();
-                            transaction.Dispose();
+                            cancellationToken.ThrowIfCancellationRequested();
 
-                            transaction = _connection.BeginTransaction();
-                            insertCmd.Transaction = transaction;
+                            ParseLineFast(line.AsSpan(), format.Delimiter, insertCmd, parameters);
+                            rowCount++;
 
-                            // 定期的に進捗報告
-                            if (lastReportStopwatch.ElapsedMilliseconds > 200)
+                            if (rowCount % batchSize == 0)
                             {
-                                double elapsedSec = stopwatch.Elapsed.TotalSeconds;
-                                double rowsPerSec = elapsedSec > 0 ? rowCount / elapsedSec : 0;
-                                double percent = totalBytes > 0 ? (double)processedBytes / totalBytes * 100 : 0;
-                                progress.Report(new ProgressInfo
+                                transaction.Commit();
+                                transaction.Dispose();
+                                transaction = _connection.BeginTransaction();
+                                insertCmd.Transaction = transaction;
+
+                                if (lastReportStopwatch.ElapsedMilliseconds > 200)
                                 {
-                                    LoadedRows = rowCount,
-                                    RowsPerSecond = rowsPerSec,
-                                    Percent = Math.Min(percent, 99.9),
-                                    Status = $"インポート中 ({rowCount:N0} 行)..."
-                                });
-                                lastReportStopwatch.Restart();
+                                    double elapsedSec = stopwatch.Elapsed.TotalSeconds;
+                                    double rowsPerSec = elapsedSec > 0 ? rowCount / elapsedSec : 0;
+                                    double percent = totalBytes > 0 ? (double)processedBytes / totalBytes * 100 : 0;
+                                    progress.Report(new ProgressInfo
+                                    {
+                                        LoadedRows = rowCount,
+                                        RowsPerSecond = rowsPerSec,
+                                        Percent = Math.Min(percent, 99.9),
+                                        Status = $"[FastSpan] インポート中 ({rowCount:N0} 行)..."
+                                    });
+                                    lastReportStopwatch.Restart();
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // ----- 既存の CsvHelper ベースのパーサー -----
+                        var config = new CsvConfiguration(CultureInfo.InvariantCulture)
+                        {
+                            Delimiter = format.Delimiter,
+                            HasHeaderRecord = format.HasHeader,
+                            BadDataFound = context => { },
+                            MissingFieldFound = args => { }
+                        };
+                        using var csv = new CsvReader(reader, config);
+
+                        if (format.HasHeader)
+                        {
+                            csv.Read();
+                            csv.ReadHeader();
+                        }
+
+                        while (csv.Read())
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            InsertRecord(csv, insertCmd, parameters);
+                            rowCount++;
+
+                            if (rowCount % batchSize == 0)
+                            {
+                                transaction.Commit();
+                                transaction.Dispose();
+                                transaction = _connection.BeginTransaction();
+                                insertCmd.Transaction = transaction;
+
+                                if (lastReportStopwatch.ElapsedMilliseconds > 200)
+                                {
+                                    double elapsedSec = stopwatch.Elapsed.TotalSeconds;
+                                    double rowsPerSec = elapsedSec > 0 ? rowCount / elapsedSec : 0;
+                                    double percent = totalBytes > 0 ? (double)processedBytes / totalBytes * 100 : 0;
+                                    progress.Report(new ProgressInfo
+                                    {
+                                        LoadedRows = rowCount,
+                                        RowsPerSecond = rowsPerSec,
+                                        Percent = Math.Min(percent, 99.9),
+                                        Status = $"[CsvHelper] インポート中 ({rowCount:N0} 行)..."
+                                    });
+                                    lastReportStopwatch.Restart();
+                                }
                             }
                         }
                     }
@@ -240,6 +296,45 @@ namespace FileReader.Services
                 });
 
             }, cancellationToken);
+        }
+
+        private void ParseLineFast(ReadOnlySpan<char> line, string delimiter, SqliteCommand cmd, List<SqliteParameter> parameters)
+        {
+            int paramIndex = 0;
+            int delimiterLength = delimiter.Length;
+            
+            while (line.Length > 0 && paramIndex < parameters.Count)
+            {
+                int nextDelimiter = line.IndexOf(delimiter.AsSpan());
+                ReadOnlySpan<char> fieldSpan;
+
+                if (nextDelimiter == -1)
+                {
+                    fieldSpan = line;
+                    line = ReadOnlySpan<char>.Empty;
+                }
+                else
+                {
+                    fieldSpan = line.Slice(0, nextDelimiter);
+                    line = line.Slice(nextDelimiter + delimiterLength);
+                }
+
+                // CSVのクォート除去 (両端がダブルクォートの場合のみ簡易的に除去)
+                if (fieldSpan.Length >= 2 && fieldSpan[0] == '"' && fieldSpan[fieldSpan.Length - 1] == '"')
+                {
+                    fieldSpan = fieldSpan.Slice(1, fieldSpan.Length - 2);
+                }
+
+                parameters[paramIndex].Value = fieldSpan.ToString();
+                paramIndex++;
+            }
+
+            for (int i = paramIndex; i < parameters.Count; i++)
+            {
+                parameters[i].Value = string.Empty;
+            }
+
+            cmd.ExecuteNonQuery();
         }
 
         private void InsertRecord(CsvReader csv, SqliteCommand cmd, List<SqliteParameter> parameters)
