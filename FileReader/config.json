@@ -1,0 +1,26 @@
+{
+  "LogFormats": [
+    {
+      "Extension": ".csv",
+      "Delimiter": ",",
+      "HasHeader": true
+    },
+    {
+      "Extension": ".tsv",
+      "Delimiter": "\t",
+      "HasHeader": true
+    },
+    {
+      "Extension": ".log",
+      "Delimiter": "\t",
+      "HasHeader": false,
+      "Columns": [ "Timestamp", "Level", "Logger", "Message" ]
+    },
+    {
+      "Extension": ".dat",
+      "Delimiter": "|",
+      "HasHeader": false,
+      "Columns": [ "Id", "Name", "Value", "Timestamp" ]
+    }
+  ]
+}
