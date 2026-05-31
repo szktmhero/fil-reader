@@ -4,15 +4,14 @@ using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using FileReader.Services;
+using FileReader.Models;
 
 namespace FileReader.Collections
 {
     public class VirtualizingList : IList, INotifyCollectionChanged, INotifyPropertyChanged
     {
         private readonly LogDatabase _database;
-        private readonly string? _filterColumn;
-        private readonly string? _filterKeyword;
-        private readonly bool _searchPrefixOnly;
+        private readonly List<SearchCondition> _conditions;
         private readonly int _pageSize;
         private int _count = -1;
 
@@ -25,12 +24,10 @@ namespace FileReader.Collections
         public event NotifyCollectionChangedEventHandler? CollectionChanged;
         public event PropertyChangedEventHandler? PropertyChanged;
 
-        public VirtualizingList(LogDatabase database, string? filterColumn, string? filterKeyword, bool searchPrefixOnly, int pageSize = 100)
+        public VirtualizingList(LogDatabase database, List<SearchCondition> conditions, int pageSize = 100)
         {
             _database = database;
-            _filterColumn = filterColumn;
-            _filterKeyword = filterKeyword;
-            _searchPrefixOnly = searchPrefixOnly;
+            _conditions = conditions ?? new List<SearchCondition>();
             _pageSize = pageSize;
         }
 
@@ -48,7 +45,7 @@ namespace FileReader.Collections
                 {
                     // データベースからページデータをロード
                     int dbOffset = pageNumber * _pageSize;
-                    page = _database.GetPage(dbOffset, _pageSize, _filterColumn, _filterKeyword, _searchPrefixOnly);
+                    page = _database.GetPage(dbOffset, _pageSize, _conditions);
                     
                     // キャッシュに格納
                     _pageCache[pageNumber] = page;
@@ -79,7 +76,7 @@ namespace FileReader.Collections
             {
                 if (_count == -1)
                 {
-                    _count = _database.GetTotalCount(_filterColumn, _filterKeyword, _searchPrefixOnly);
+                    _count = _database.GetTotalCount(_conditions);
                 }
                 return _count;
             }

@@ -5,6 +5,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
+using System.Collections.ObjectModel;
+using System.Linq;
 using FileReader.Collections;
 using FileReader.Models;
 using FileReader.Services;
@@ -27,9 +29,12 @@ namespace FileReader.ViewModels
         private string _indexStatus = "インデックス未作成";
 
         private List<string> _columns = new();
-        private string? _selectedColumn = "全列";
-        private string _searchKeyword = string.Empty;
-        private bool _searchPrefixOnly = false; // 前方一致（デフォルトは部分一致）
+        public ObservableCollection<SearchCondition> SearchConditions { get; } = new ObservableCollection<SearchCondition>();
+        
+        public List<string> Operators { get; } = new List<string> 
+        { 
+            "LIKE (部分一致)", "LIKE (前方一致)", "=", "!=", "<", "<=", ">", ">=" 
+        };
         
         private VirtualizingList? _logData;
         private bool _isSearching = false;
@@ -94,24 +99,6 @@ namespace FileReader.ViewModels
             set => SetProperty(ref _columns, value);
         }
 
-        public string? SelectedColumn
-        {
-            get => _selectedColumn;
-            set => SetProperty(ref _selectedColumn, value);
-        }
-
-        public string SearchKeyword
-        {
-            get => _searchKeyword;
-            set => SetProperty(ref _searchKeyword, value);
-        }
-
-        public bool SearchPrefixOnly
-        {
-            get => _searchPrefixOnly;
-            set => SetProperty(ref _searchPrefixOnly, value);
-        }
-
         public VirtualizingList? LogData
         {
             get => _logData;
@@ -134,6 +121,9 @@ namespace FileReader.ViewModels
 
         public ICommand SearchCommand { get; }
         public ICommand CancelImportCommand { get; }
+        public ICommand AddConditionCommand { get; }
+        public ICommand RemoveConditionCommand { get; }
+        public ICommand ExportCommand { get; }
 
         public LogTabViewModel(string filePath)
         {
@@ -144,8 +134,27 @@ namespace FileReader.ViewModels
             _database = new LogDatabase();
             _database.Init();
 
+            // デフォルトの検索条件を1つ追加
+            SearchConditions.Add(new SearchCondition());
+
             SearchCommand = new RelayCommand(ExecuteSearch, () => CanSearch);
             CancelImportCommand = new RelayCommand(CancelImport, () => IsImporting);
+            AddConditionCommand = new RelayCommand(AddCondition, () => CanSearch);
+            RemoveConditionCommand = new RelayCommand<SearchCondition>(RemoveCondition, _ => CanSearch);
+            ExportCommand = new RelayCommand(ExecuteExport, () => CanSearch && LogData != null && LogData.Count > 0);
+        }
+
+        private void AddCondition()
+        {
+            SearchConditions.Add(new SearchCondition());
+        }
+
+        private void RemoveCondition(SearchCondition? condition)
+        {
+            if (condition != null && SearchConditions.Count > 1)
+            {
+                SearchConditions.Remove(condition);
+            }
         }
 
         public async void StartImport(LogFormat format)
@@ -164,12 +173,11 @@ namespace FileReader.ViewModels
                 var cols = new List<string> { "全列" };
                 cols.AddRange(_database.Columns);
                 Columns = cols;
-                SelectedColumn = "全列";
 
                 IsImporting = false;
 
                 // DataGridに最初の表示データをバインド
-                LogData = new VirtualizingList(_database, null, null, false);
+                LogData = new VirtualizingList(_database, new List<SearchCondition>());
                 
                 // バックグラウンドでインデックスの構築を開始
                 _ = Task.Run(() => BuildIndexesAsync());
@@ -214,10 +222,8 @@ namespace FileReader.ViewModels
 
             try
             {
-                string? filterCol = SelectedColumn == "全列" ? null : SelectedColumn;
-                
                 // 検索結果バインド
-                LogData = new VirtualizingList(_database, filterCol, SearchKeyword, SearchPrefixOnly);
+                LogData = new VirtualizingList(_database, SearchConditions.ToList());
                 
                 int count = LogData.Count; // Countへのアクセスにより SQLite で SELECT COUNT(*) が実行される
                 StatusMessage = $"検索完了: {count:N0} 件該当";
@@ -230,6 +236,56 @@ namespace FileReader.ViewModels
             finally
             {
                 IsSearching = false;
+            }
+        }
+
+        private async void ExecuteExport()
+        {
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                Title = "検索結果を保存",
+                Filter = "元の形式 (自動)|*.*|CSVファイル (*.csv)|*.csv|TSVファイル (*.tsv)|*.tsv",
+                FileName = $"export_{FileName}"
+            };
+
+            if (dialog.ShowDialog() == true)
+            {
+                string targetPath = dialog.FileName;
+                string delimiter = "\t"; 
+                bool writeHeader = true;
+
+                if (targetPath.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)) delimiter = ",";
+                else if (targetPath.EndsWith(".tsv", StringComparison.OrdinalIgnoreCase)) delimiter = "\t";
+                else
+                {
+                    if (FileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)) delimiter = ",";
+                    else if (FileName.EndsWith(".tsv", StringComparison.OrdinalIgnoreCase)) delimiter = "\t";
+                    else delimiter = "\t";
+                }
+
+                IsSearching = true;
+                StatusMessage = "エクスポートの準備中...";
+
+                var progress = new Progress<ProgressInfo>(info =>
+                {
+                    StatusMessage = info.Status;
+                });
+
+                try
+                {
+                    await _database.ExportSearchResultsAsync(targetPath, delimiter, writeHeader, SearchConditions.ToList(), progress, _cts.Token);
+                    MessageBox.Show("エクスポートが完了しました。", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                catch (Exception ex)
+                {
+                    StatusMessage = $"エクスポートエラー: {ex.Message}";
+                    MessageBox.Show($"保存中にエラーが発生しました:\n{ex.Message}", "エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+                finally
+                {
+                    IsSearching = false;
+                    StatusMessage = $"エクスポート完了: {LogData?.Count ?? 0:N0} 件該当";
+                }
             }
         }
 

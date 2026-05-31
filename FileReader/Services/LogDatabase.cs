@@ -375,27 +375,27 @@ namespace FileReader.Services
             });
         }
 
-        public int GetTotalCount(string? filterColumn, string? filterKeyword, bool searchPrefixOnly)
+        public int GetTotalCount(List<SearchCondition> conditions)
         {
             if (_connection == null) return 0;
 
             using var cmd = _connection.CreateCommand();
             var sql = new StringBuilder("SELECT COUNT(*) FROM log_data");
-            BuildFilterQuery(sql, cmd, filterColumn, filterKeyword, searchPrefixOnly);
+            BuildFilterQuery(sql, cmd, conditions);
             
             cmd.CommandText = sql.ToString();
             var obj = cmd.ExecuteScalar();
             return obj != null ? Convert.ToInt32(obj) : 0;
         }
 
-        public List<Dictionary<string, string>> GetPage(int offset, int limit, string? filterColumn, string? filterKeyword, bool searchPrefixOnly)
+        public List<Dictionary<string, string>> GetPage(int offset, int limit, List<SearchCondition> conditions)
         {
             var results = new List<Dictionary<string, string>>();
             if (_connection == null) return results;
 
             using var cmd = _connection.CreateCommand();
             var sql = new StringBuilder("SELECT rowid, * FROM log_data");
-            BuildFilterQuery(sql, cmd, filterColumn, filterKeyword, searchPrefixOnly);
+            BuildFilterQuery(sql, cmd, conditions);
             
             // rowidで並べることで、インポート順の表示を保証し、スクロールを安定化
             sql.Append($" ORDER BY rowid LIMIT {limit} OFFSET {offset}");
@@ -417,32 +417,133 @@ namespace FileReader.Services
             return results;
         }
 
-        private void BuildFilterQuery(StringBuilder sql, SqliteCommand cmd, string? filterColumn, string? filterKeyword, bool searchPrefixOnly)
+        private void BuildFilterQuery(StringBuilder sql, SqliteCommand cmd, List<SearchCondition>? conditions)
         {
-            if (string.IsNullOrWhiteSpace(filterKeyword)) return;
+            if (conditions == null || conditions.Count == 0) return;
+
+            var validConditions = conditions.Where(c => !string.IsNullOrWhiteSpace(c.Keyword)).ToList();
+            if (validConditions.Count == 0) return;
 
             sql.Append(" WHERE ");
-            string likePattern = searchPrefixOnly ? $"{filterKeyword}%" : $"%{filterKeyword}%";
+            var andParts = new List<string>();
+            int paramIndex = 0;
 
-            if (!string.IsNullOrEmpty(filterColumn) && _columns.Contains(filterColumn))
+            foreach (var cond in validConditions)
             {
-                // 特定列での絞り込み
-                sql.Append($"[{filterColumn}] LIKE @keyword");
-                cmd.Parameters.AddWithValue("@keyword", likePattern);
-            }
-            else
-            {
-                // 全列での絞り込み
-                var orParts = new List<string>();
-                int paramIndex = 0;
-                foreach (var col in _columns)
+                string paramName = $"@keyword_{paramIndex++}";
+                string keywordValue = cond.Keyword;
+                string opSql = "=";
+
+                switch (cond.Operator)
                 {
-                    string paramName = $"@keyword_{paramIndex++}";
-                    orParts.Add($"[{col}] LIKE {paramName}");
-                    cmd.Parameters.AddWithValue(paramName, likePattern);
+                    case "LIKE (部分一致)":
+                        opSql = "LIKE";
+                        keywordValue = $"%{cond.Keyword}%";
+                        break;
+                    case "LIKE (前方一致)":
+                        opSql = "LIKE";
+                        keywordValue = $"{cond.Keyword}%";
+                        break;
+                    case "=": opSql = "="; break;
+                    case "!=": opSql = "<>"; break;
+                    case "<": opSql = "<"; break;
+                    case "<=": opSql = "<="; break;
+                    case ">": opSql = ">"; break;
+                    case ">=": opSql = ">="; break;
                 }
-                sql.Append(string.Join(" OR ", orParts));
+
+                if (cond.Column != "全列" && _columns.Contains(cond.Column))
+                {
+                    andParts.Add($"[{cond.Column}] {opSql} {paramName}");
+                    cmd.Parameters.AddWithValue(paramName, keywordValue);
+                }
+                else
+                {
+                    var orParts = new List<string>();
+                    foreach (var col in _columns)
+                    {
+                        orParts.Add($"[{col}] {opSql} {paramName}");
+                    }
+                    andParts.Add($"({string.Join(" OR ", orParts)})");
+                    cmd.Parameters.AddWithValue(paramName, keywordValue);
+                }
             }
+
+            sql.Append(string.Join(" AND ", andParts));
+        }
+
+        public async Task ExportSearchResultsAsync(string targetFilePath, string delimiter, bool writeHeader, List<SearchCondition> conditions, IProgress<ProgressInfo> progress, CancellationToken cancellationToken)
+        {
+            if (_connection == null) return;
+
+            await Task.Run(() =>
+            {
+                using var cmd = _connection.CreateCommand();
+                var sql = new StringBuilder("SELECT rowid, * FROM log_data");
+                BuildFilterQuery(sql, cmd, conditions);
+                sql.Append(" ORDER BY rowid");
+                
+                cmd.CommandText = sql.ToString();
+
+                long rowCount = 0;
+                var stopwatch = Stopwatch.StartNew();
+                var lastReportStopwatch = Stopwatch.StartNew();
+
+                using var fs = new FileStream(targetFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, useAsync: false);
+                using var writer = new StreamWriter(fs, Encoding.UTF8);
+                using var reader = cmd.ExecuteReader();
+
+                if (writeHeader)
+                {
+                    writer.WriteLine(string.Join(delimiter, _columns));
+                }
+
+                while (reader.Read())
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var lineBuilder = new StringBuilder();
+                    for (int i = 0; i < _columns.Count; i++)
+                    {
+                        var val = reader[_columns[i]]?.ToString() ?? string.Empty;
+                        if (val.Contains(delimiter) || val.Contains("\"") || val.Contains("\n") || val.Contains("\r"))
+                        {
+                            val = $"\"{val.Replace("\"", "\"\"")}\"";
+                        }
+                        lineBuilder.Append(val);
+                        if (i < _columns.Count - 1)
+                        {
+                            lineBuilder.Append(delimiter);
+                        }
+                    }
+                    writer.WriteLine(lineBuilder.ToString());
+                    rowCount++;
+
+                    if (rowCount % 10000 == 0 && lastReportStopwatch.ElapsedMilliseconds > 200)
+                    {
+                        double elapsedSec = stopwatch.Elapsed.TotalSeconds;
+                        double rowsPerSec = elapsedSec > 0 ? rowCount / elapsedSec : 0;
+                        progress.Report(new ProgressInfo
+                        {
+                            LoadedRows = rowCount,
+                            RowsPerSecond = rowsPerSec,
+                            Percent = 0, // 不定
+                            Status = $"エクスポート中 ({rowCount:N0} 行)..."
+                        });
+                        lastReportStopwatch.Restart();
+                    }
+                }
+
+                stopwatch.Stop();
+                progress.Report(new ProgressInfo
+                {
+                    LoadedRows = rowCount,
+                    RowsPerSecond = stopwatch.Elapsed.TotalSeconds > 0 ? rowCount / stopwatch.Elapsed.TotalSeconds : 0,
+                    Percent = 100,
+                    Status = $"エクスポート完了! 計 {rowCount:N0} 行 ({stopwatch.Elapsed.TotalSeconds:F2}秒)"
+                });
+
+            }, cancellationToken);
         }
 
         public void Dispose()

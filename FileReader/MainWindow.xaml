@@ -74,12 +74,12 @@
 
         <!-- テキストボックスのカスタムスタイル -->
         <Style x:Key="ModernTextBox" TargetType="TextBox">
-            <Setter Property="Background" Value="#1E1E24"/>
-            <Setter Property="Foreground" Value="White"/>
-            <Setter Property="BorderBrush" Value="#3F3F46"/>
+            <Setter Property="Background" Value="#F3F4F6"/>
+            <Setter Property="Foreground" Value="#111827"/>
+            <Setter Property="BorderBrush" Value="#D1D5DB"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="10,8"/>
-            <Setter Property="CaretBrush" Value="White"/>
+            <Setter Property="CaretBrush" Value="#111827"/>
             <Setter Property="SelectionBrush" Value="#06B6D4"/>
             <Setter Property="Template">
                 <Setter.Value>
@@ -102,9 +102,9 @@
 
         <!-- コンボボックスのカスタムスタイル -->
         <Style x:Key="ModernComboBox" TargetType="ComboBox">
-            <Setter Property="Background" Value="#1E1E24"/>
-            <Setter Property="Foreground" Value="White"/>
-            <Setter Property="BorderBrush" Value="#3F3F46"/>
+            <Setter Property="Background" Value="#F3F4F6"/>
+            <Setter Property="Foreground" Value="#111827"/>
+            <Setter Property="BorderBrush" Value="#D1D5DB"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="10,8"/>
             <Setter Property="HorizontalContentAlignment" Value="Left"/>
@@ -288,47 +288,73 @@
                                 </Border.Style>
                                 <Grid>
                                     <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/> <!-- カラム選択 -->
-                                        <ColumnDefinition Width="*"/>    <!-- 検索キーワード -->
-                                        <ColumnDefinition Width="Auto"/> <!-- オプション -->
-                                        <ColumnDefinition Width="Auto"/> <!-- 検索ボタン -->
-                                        <ColumnDefinition Width="Auto"/> <!-- インデックス構築状態 -->
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
 
-                                    <!-- 1. 対象列 -->
-                                    <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,15,0">
-                                        <TextBlock Text="検索列:" VerticalAlignment="Center" Foreground="#9CA3AF" Margin="0,0,8,0"/>
-                                        <ComboBox Width="130" ItemsSource="{Binding Columns}" SelectedItem="{Binding SelectedColumn}" 
-                                                  Style="{StaticResource ModernComboBox}"/>
-                                    </StackPanel>
+                                    <!-- 動的検索条件リスト -->
+                                    <ItemsControl Grid.Column="0" ItemsSource="{Binding SearchConditions}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="0,0,0,10">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
 
-                                    <!-- 2. キーワード -->
-                                    <TextBox Grid.Column="1" Style="{StaticResource ModernTextBox}" Text="{Binding SearchKeyword, UpdateSourceTrigger=PropertyChanged}"
-                                             KeyDown="SearchTextBox_KeyDown" Tag="検索キーワードを入力..."/>
+                                                    <ComboBox Grid.Column="0" Width="130" Margin="0,0,10,0"
+                                                              ItemsSource="{Binding DataContext.Columns, RelativeSource={RelativeSource AncestorType=ItemsControl}}" 
+                                                              SelectedItem="{Binding Column}" 
+                                                              Style="{StaticResource ModernComboBox}"/>
 
-                                    <!-- 3. 前方一致オプション -->
-                                    <CheckBox Grid.Column="2" Content="前方一致のみ (超高速)" Foreground="#9CA3AF" Margin="15,0" 
-                                              IsChecked="{Binding SearchPrefixOnly}" VerticalAlignment="Center" Cursor="Hand"/>
+                                                    <ComboBox Grid.Column="1" Width="130" Margin="0,0,10,0"
+                                                              ItemsSource="{Binding DataContext.Operators, RelativeSource={RelativeSource AncestorType=ItemsControl}}" 
+                                                              SelectedItem="{Binding Operator}" 
+                                                              Style="{StaticResource ModernComboBox}"/>
 
-                                    <!-- 4. 検索ボタン -->
-                                    <Button Grid.Column="3" Content="検索" Style="{StaticResource AccentButton}" Width="80"
-                                            Command="{Binding SearchCommand}"/>
+                                                    <TextBox Grid.Column="2" Style="{StaticResource ModernTextBox}" 
+                                                             Text="{Binding Keyword, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,10,0" />
 
-                                    <!-- 5. インデックス構築インジケータ -->
-                                    <StackPanel Grid.Column="4" Orientation="Horizontal" Margin="15,0,0,0" VerticalAlignment="Center">
-                                        <Ellipse Width="10" Height="10" Margin="0,0,8,0">
-                                            <Ellipse.Style>
-                                                <Style TargetType="Ellipse">
-                                                    <Setter Property="Fill" Value="#EF4444"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding IsIndexed}" Value="True">
-                                                            <Setter Property="Fill" Value="#10B981"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </Ellipse.Style>
-                                        </Ellipse>
-                                        <TextBlock Text="{Binding IndexStatus}" FontSize="12" Foreground="#9CA3AF" VerticalAlignment="Center"/>
+                                                    <Button Grid.Column="3" Content="✖" Width="35" Background="#3F3F46" Foreground="White"
+                                                            Style="{StaticResource ModernButton}" 
+                                                            Command="{Binding DataContext.RemoveConditionCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}" 
+                                                            CommandParameter="{Binding}"/>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+
+                                    <!-- 追加ボタン -->
+                                    <Button Grid.Column="1" Content="＋ 条件追加" Style="{StaticResource ModernButton}" Background="#3F3F46"
+                                            Command="{Binding AddConditionCommand}" Margin="10,0,15,10" VerticalAlignment="Top"/>
+
+                                    <!-- 検索ボタンとステータス -->
+                                    <StackPanel Grid.Column="2" Orientation="Vertical" VerticalAlignment="Top" Margin="0,0,0,0">
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                            <Button Content="検索" Style="{StaticResource AccentButton}" Width="80" Height="35"
+                                                    Command="{Binding SearchCommand}" Margin="0,0,10,0"/>
+                                            <Button Content="保存..." Style="{StaticResource ModernButton}" Width="80" Height="35" Background="#10B981"
+                                                    Command="{Binding ExportCommand}"/>
+                                        </StackPanel>
+                                        
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Ellipse Width="10" Height="10" Margin="0,0,8,0">
+                                                <Ellipse.Style>
+                                                    <Style TargetType="Ellipse">
+                                                        <Setter Property="Fill" Value="#EF4444"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsIndexed}" Value="True">
+                                                                <Setter Property="Fill" Value="#10B981"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Ellipse.Style>
+                                            </Ellipse>
+                                            <TextBlock Text="{Binding IndexStatus}" FontSize="11" Foreground="#9CA3AF" VerticalAlignment="Center"/>
+                                        </StackPanel>
                                     </StackPanel>
                                 </Grid>
                             </Border>
