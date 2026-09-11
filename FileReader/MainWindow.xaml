@@ -340,6 +340,7 @@
                                                     Command="{Binding ExportCommand}"/>
                                         </StackPanel>
                                         
+                                        <Button Content="分析・パターン..." Command="{Binding AnalysisCommand}" Style="{StaticResource ModernButton}" Margin="0,0,0,8"/>
                                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
                                             <Ellipse Width="10" Height="10" Margin="0,0,8,0">
                                                 <Ellipse.Style>

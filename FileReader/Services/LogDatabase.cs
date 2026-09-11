@@ -36,7 +36,7 @@ namespace FileReader.Services
         public bool IsIndexed => _isIndexed;
 
         // フィーチャーフラグ: Span<T>を用いた自作の高速パーサーを使用するか（CsvHelperの代替）
-        public bool UseFastSpanParser { get; set; } = true;
+        public bool UseFastSpanParser { get; set; } = false;
 
         public LogDatabase()
         {
@@ -109,7 +109,7 @@ namespace FileReader.Services
                         BadDataFound = context => { },
                         MissingFieldFound = args => { }
                     };
-                    using var csv = new CsvReader(reader, config);
+                    using var csv = new CsvReader(reader, config, leaveOpen: true);
                     if (!csv.Read()) throw new Exception("ファイルが空か、読み込み不可能です。");
 
                     if (format.HasHeader)
@@ -234,7 +234,7 @@ namespace FileReader.Services
                             BadDataFound = context => { },
                             MissingFieldFound = args => { }
                         };
-                        using var csv = new CsvReader(reader, config);
+                        using var csv = new CsvReader(reader, config, leaveOpen: true);
 
                         if (format.HasHeader)
                         {
