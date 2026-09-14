@@ -28,6 +28,7 @@ namespace FileReader.Services
         private readonly string _connectionString;
         private SqliteConnection? _connection;
         private readonly List<string> _columns = new();
+        private string _rowIdColumn = "rowid";
         private bool _isIndexed = false;
         private bool _isDisposed = false;
 
@@ -106,10 +107,10 @@ namespace FileReader.Services
                     {
                         Delimiter = format.Delimiter,
                         HasHeaderRecord = format.HasHeader,
-                        BadDataFound = context => { },
-                        MissingFieldFound = args => { }
+                        BadDataFound = args => throw new InvalidDataException($"CSV {args.Context.Parser!.RawRow}行目: 引用符の形式が不正です。")
                     };
-                    using var csv = new CsvReader(reader, config, leaveOpen: true);
+                    using var headerReader = new StreamReader(fileStream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, bufferSize: 1024, leaveOpen: true);
+                    using var csv = new CsvReader(headerReader, config, leaveOpen: true);
                     if (!csv.Read()) throw new Exception("ファイルが空か、読み込み不可能です。");
 
                     if (format.HasHeader)
@@ -144,12 +145,19 @@ namespace FileReader.Services
                     reader.DiscardBufferedData();
                 }
 
+                // Normalized header names must be unique; preserve input rowid as data.
+                var duplicate = _columns.GroupBy(c => c, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
+                if (duplicate != null) throw new InvalidDataException($"CSVの列名が重複しています: {duplicate.Key}");
+                _rowIdColumn = "rowid";
+                for (int suffix = 1; _columns.Contains(_rowIdColumn, StringComparer.OrdinalIgnoreCase); suffix++)
+                    _rowIdColumn = $"__file_reader_rowid_{suffix}";
+
                 // テーブル作成SQLの組み立て
                 var createTableSql = new StringBuilder();
-                createTableSql.Append("CREATE TABLE log_data (rowid INTEGER PRIMARY KEY");
+                createTableSql.Append($"CREATE TABLE log_data ({AnalysisService.Quote(_rowIdColumn)} INTEGER PRIMARY KEY");
                 foreach (var col in _columns)
                 {
-                    createTableSql.Append($", [{col}] TEXT");
+                    createTableSql.Append($", {AnalysisService.Quote(col)} TEXT");
                 }
                 createTableSql.Append(");");
 
@@ -162,9 +170,9 @@ namespace FileReader.Services
                 // インサート用SQLの準備
                 var insertSql = new StringBuilder();
                 insertSql.Append("INSERT INTO log_data (");
-                insertSql.Append(string.Join(", ", _columns.ConvertAll(c => $"[{c}]")));
+                insertSql.Append(string.Join(", ", _columns.ConvertAll(AnalysisService.Quote)));
                 insertSql.Append(") VALUES (");
-                insertSql.Append(string.Join(", ", _columns.ConvertAll(c => $"@{c}")));
+                insertSql.Append(string.Join(", ", Enumerable.Range(0, _columns.Count).Select(i => $"@p{i}")));
                 insertSql.Append(");");
 
                 using var insertCmd = _connection.CreateCommand();
@@ -173,7 +181,7 @@ namespace FileReader.Services
                 var parameters = new List<SqliteParameter>();
                 foreach (var col in _columns)
                 {
-                    var param = new SqliteParameter($"@{col}", SqliteType.Text);
+                    var param = new SqliteParameter($"@p{parameters.Count}", SqliteType.Text);
                     insertCmd.Parameters.Add(param);
                     parameters.Add(param);
                 }
@@ -231,8 +239,7 @@ namespace FileReader.Services
                         {
                             Delimiter = format.Delimiter,
                             HasHeaderRecord = format.HasHeader,
-                            BadDataFound = context => { },
-                            MissingFieldFound = args => { }
+                            BadDataFound = args => throw new InvalidDataException($"CSV {args.Context.Parser!.RawRow}行目: 引用符の形式が不正です。")
                         };
                         using var csv = new CsvReader(reader, config, leaveOpen: true);
 
@@ -340,6 +347,8 @@ namespace FileReader.Services
         private void InsertRecord(CsvReader csv, SqliteCommand cmd, List<SqliteParameter> parameters)
         {
             int parseCount = csv.Parser.Count;
+            if (parseCount != _columns.Count)
+                throw new InvalidDataException($"CSV {csv.Parser.RawRow}行目: 列数が一致しません（期待 {_columns.Count}、実際 {parseCount}）。");
             int limit = Math.Min(_columns.Count, parseCount);
 
             for (int i = 0; i < limit; i++)
@@ -367,7 +376,7 @@ namespace FileReader.Services
                 {
                     progress.Report($"インデックスを作成中: {col} ({++count}/{_columns.Count})");
                     using var cmd = _connection.CreateCommand();
-                    cmd.CommandText = $"CREATE INDEX IF NOT EXISTS [idx_log_{col}] ON log_data ([{col}]);";
+                    cmd.CommandText = $"CREATE INDEX IF NOT EXISTS {AnalysisService.Quote("idx_log_" + col)} ON log_data ({AnalysisService.Quote(col)});";
                     cmd.ExecuteNonQuery();
                 }
                 _isIndexed = true;
@@ -394,11 +403,11 @@ namespace FileReader.Services
             if (_connection == null) return results;
 
             using var cmd = _connection.CreateCommand();
-            var sql = new StringBuilder("SELECT rowid, * FROM log_data");
+            var sql = new StringBuilder($"SELECT {AnalysisService.Quote(_rowIdColumn)}, * FROM log_data");
             BuildFilterQuery(sql, cmd, conditions);
             
             // rowidで並べることで、インポート順の表示を保証し、スクロールを安定化
-            sql.Append($" ORDER BY rowid LIMIT {limit} OFFSET {offset}");
+            sql.Append($" ORDER BY {AnalysisService.Quote(_rowIdColumn)} LIMIT {limit} OFFSET {offset}");
             
             cmd.CommandText = sql.ToString();
             using var reader = cmd.ExecuteReader();
@@ -406,7 +415,7 @@ namespace FileReader.Services
             {
                 var row = new Dictionary<string, string>();
                 // rowidも追加
-                row["__rowid__"] = reader["rowid"].ToString() ?? "";
+                row["__rowid__"] = reader[0].ToString() ?? "";
                 foreach (var col in _columns)
                 {
                     row[col] = reader[col]?.ToString() ?? string.Empty;
@@ -454,7 +463,7 @@ namespace FileReader.Services
 
                 if (cond.Column != "全列" && _columns.Contains(cond.Column))
                 {
-                    andParts.Add($"[{cond.Column}] {opSql} {paramName}");
+                    andParts.Add($"{AnalysisService.Quote(cond.Column)} {opSql} {paramName}");
                     cmd.Parameters.AddWithValue(paramName, keywordValue);
                 }
                 else
@@ -462,7 +471,7 @@ namespace FileReader.Services
                     var orParts = new List<string>();
                     foreach (var col in _columns)
                     {
-                        orParts.Add($"[{col}] {opSql} {paramName}");
+                        orParts.Add($"{AnalysisService.Quote(col)} {opSql} {paramName}");
                     }
                     andParts.Add($"({string.Join(" OR ", orParts)})");
                     cmd.Parameters.AddWithValue(paramName, keywordValue);
@@ -479,9 +488,9 @@ namespace FileReader.Services
             await Task.Run(() =>
             {
                 using var cmd = _connection.CreateCommand();
-                var sql = new StringBuilder("SELECT rowid, * FROM log_data");
+                var sql = new StringBuilder($"SELECT {AnalysisService.Quote(_rowIdColumn)}, * FROM log_data");
                 BuildFilterQuery(sql, cmd, conditions);
-                sql.Append(" ORDER BY rowid");
+                sql.Append($" ORDER BY {AnalysisService.Quote(_rowIdColumn)}");
                 
                 cmd.CommandText = sql.ToString();
 
@@ -495,7 +504,7 @@ namespace FileReader.Services
 
                 if (writeHeader)
                 {
-                    writer.WriteLine(string.Join(delimiter, _columns));
+                    writer.WriteLine(string.Join(delimiter, _columns.Select(c => "\"" + c.Replace("\"", "\"\"") + "\"")));
                 }
 
                 while (reader.Read())

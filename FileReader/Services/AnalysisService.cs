@@ -39,6 +39,11 @@ public static class AnalysisService
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         { DataSource = path, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
         connection.Open();
+        // A missing quoted identifier must fail, never become a string constant.
+        int configured = SQLitePCL.raw.sqlite3_db_config(connection.Handle,
+            SQLitePCL.raw.SQLITE_DBCONFIG_DQS_DML, 0, out _);
+        if (configured != SQLitePCL.raw.SQLITE_OK)
+            throw new InvalidOperationException("SQLの列名検証を有効にできませんでした。");
         connection.CreateFunction<string?, double?>("safe_number", Number);
         using (var guard = connection.CreateCommand())
         {
@@ -76,11 +81,13 @@ public static class AnalysisService
         catch (SqliteException) when (token.IsCancellationRequested) { throw new OperationCanceledException(token); }
     }, token);
 
-    public static void Export(DataTable table, string path)
+    public static void Export(DataTable table, string path) => Export(table.DefaultView, path);
+
+    public static void Export(DataView view, string path)
     {
         static string Escape(object value) => "\"" + (Convert.ToString(value, CultureInfo.InvariantCulture) ?? "").Replace("\"", "\"\"") + "\"";
         using var writer = new StreamWriter(path, false, new UTF8Encoding(true));
-        writer.WriteLine(string.Join(",", table.Columns.Cast<DataColumn>().Select(c => Escape(c.ColumnName))));
-        foreach (DataRow row in table.Rows) writer.WriteLine(string.Join(",", row.ItemArray.Select(v => Escape(v ?? ""))));
+        writer.WriteLine(string.Join(",", view.Table!.Columns.Cast<DataColumn>().Select(c => Escape(c.ColumnName))));
+        foreach (DataRowView row in view) writer.WriteLine(string.Join(",", row.Row.ItemArray.Select(v => Escape(v ?? ""))));
     }
 }

@@ -28,7 +28,7 @@ public sealed class AnalysisWindow : Window
     private readonly ComboBox y = new() { Width = 160 };
     private readonly DataGrid grid = new() { IsReadOnly = true, AutoGenerateColumns = true, CanUserAddRows = false, EnableRowVirtualization = true };
     private readonly Canvas chart = new() { Background = Brushes.White, MinHeight = 200, ClipToBounds = true };
-    private readonly TextBlock status = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4), Text = "テーブル: log_data。簡易集計はファイル全体が対象です。検索条件は元画面で適用してください。" };
+    private readonly TextBlock status = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4), Text = "テーブル: log_data。SQL・簡易集計はファイル全体が対象です。元画面の検索条件は適用されません。絞り込みはSQLのWHEREで指定してください。" };
     private readonly StackPanel controls = new();
     private CancellationTokenSource? running;
     private DataTable? result;
@@ -60,6 +60,9 @@ public sealed class AnalysisWindow : Window
         tabs.Items.Add(new TabItem { Header = "結果テーブル", Content = grid });
         tabs.Items.Add(new TabItem { Header = "グラフ", Content = chart });
         chart.SizeChanged += (_, _) => { if (result != null) DrawChart(); };
+        x.SelectionChanged += (_, _) => DrawChart();
+        y.SelectionChanged += (_, _) => DrawChart();
+        chartType.SelectionChanged += (_, _) => DrawChart();
         Closing += (_, e) => { if (running != null) { running.Cancel(); e.Cancel = true; status.Text = "中断しています。完了後に閉じてください。"; } };
         try { patterns = store.Load(); RefreshPatterns(); }
         catch (Exception ex) { storeHealthy = false; status.Text = "パターンを読み込めません。既存ファイルを保護するため保存を停止しました: " + ex.Message; }
@@ -125,8 +128,8 @@ public sealed class AnalysisWindow : Window
     private void BuildAggregate()
     {
         string function = aggregate.SelectedItem?.ToString() ?? "COUNT";
-        string expression = function == "COUNT" ? "COUNT(*)" : $"{function}(safe_number({AnalysisService.Quote(measure.SelectedItem?.ToString() ?? throw new InvalidOperationException("集計列を選んでください。"))}))";
-        string? grouping = group.SelectedIndex > 0 ? AnalysisService.Quote(group.SelectedItem!.ToString()!) : null;
+        string expression = function == "COUNT" ? "COUNT(*)" : $"{function}(safe_number(log_data.{AnalysisService.Quote(measure.SelectedItem?.ToString() ?? throw new InvalidOperationException("集計列を選んでください。"))}))";
+        string? grouping = group.SelectedIndex > 0 ? "log_data." + AnalysisService.Quote(group.SelectedItem!.ToString()!) : null;
         sql.Text = grouping == null ? $"SELECT {expression} AS value FROM log_data;" : $"SELECT {grouping} AS category, {expression} AS value\nFROM log_data\nGROUP BY {grouping}\nORDER BY category;";
         status.Text = "集計SQLを作成しました。空欄はNULLとして扱い、不正な数値があればエラーにします。実行前にWHERE等を追加できます。";
     }
@@ -144,6 +147,8 @@ public sealed class AnalysisWindow : Window
             x.ItemsSource = columns; y.ItemsSource = columns;
             x.SelectedItem = columns.Contains(preferredX) ? preferredX : columns.FirstOrDefault();
             y.SelectedItem = columns.Contains(preferredY) ? preferredY : columns.Skip(1).FirstOrDefault() ?? columns.FirstOrDefault();
+            result.DefaultView.ListChanged += (_, _) => DrawChart();
+            DrawChart();
             status.Text = $"{result.Rows.Count:N0}行。" + (response.Truncated ? "表示上限10,000行で打ち切りました。CSV・グラフも表示結果が対象です。" : "CSV・グラフはこの実行結果が対象です。")
                 + ((preferredX.Length > 0 && !columns.Contains(preferredX)) || (preferredY.Length > 0 && !columns.Contains(preferredY)) ? " 保存されたグラフ列がないため選び直してください。" : "");
         }
@@ -161,12 +166,12 @@ public sealed class AnalysisWindow : Window
     {
         chart.Children.Clear();
         if (result == null || x.SelectedItem is not string xc || y.SelectedItem is not string yc) return;
-        if (result.Rows.Count == 0) { ChartText("結果がありません。", 20, 20); return; }
-        if (result.Rows.Count > 200) { ChartText("グラフは200行までです。SQLで集計・絞り込みを行ってください。", 20, 20); return; }
+        if (result.DefaultView.Count == 0) { ChartText("結果がありません。", 20, 20); return; }
+        if (result.DefaultView.Count > 200) { ChartText("グラフは200行までです。SQLで集計・絞り込みを行ってください。", 20, 20); return; }
         var points = new List<(string Label, double Value)>();
         try
         {
-            foreach (DataRow row in result.Rows)
+            foreach (DataRowView row in result.DefaultView)
             {
                 var value = AnalysisService.Number(Convert.ToString(row[yc], CultureInfo.InvariantCulture));
                 if (value == null) throw new InvalidOperationException("Y列にNULL・空欄があります。SQLで除外または補完してください。");
@@ -182,10 +187,10 @@ public sealed class AnalysisWindow : Window
         if (!double.IsFinite(range)) { ChartText("数値の範囲が大きすぎます。SQLで単位を調整してください。", 20, 20); return; }
         double Y(double value) => 35 + height * ((max - value) / range);
         double step = width / points.Count, baseline = Y(0);
-        ChartText($"{yc} / {xc}（結果の行順・等間隔）", 75, 5);
+        ChartText($"{yc} / {xc}（表の表示順・等間隔）", 75, 5);
         for (int tick = 0; tick <= 4; tick++)
         {
-            double value = min + range * tick / 4; double py = Y(value);
+            double value = min + range * (tick / 4d); double py = Y(value);
             chart.Children.Add(new Line { X1 = 75, X2 = 75 + width, Y1 = py, Y2 = py, Stroke = Brushes.LightGray });
             ChartText(value.ToString("G4", CultureInfo.InvariantCulture), 0, py - 8);
         }
