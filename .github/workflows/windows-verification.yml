@@ -1,0 +1,24 @@
+name: Windows verification
+
+on:
+  pull_request:
+  push:
+    branches: [feature/bi-analysis-patterns, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-regression:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Build WPF application
+        run: dotnet build FileReader.sln --configuration Release --warnaserror
+      - name: Run SQLite and file regression checks
+        run: dotnet run --project FileReader.Tests --configuration Release

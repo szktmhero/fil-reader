@@ -119,6 +119,9 @@ namespace FileReader.ViewModels
 
         public bool CanSearch => !IsImporting && !IsSearching;
 
+        public string DatabasePath => _database.DbFilePath;
+        public List<string> DataColumns => _database.Columns.ToList();
+        public ICommand AnalysisCommand { get; }
         public ICommand SearchCommand { get; }
         public ICommand CancelImportCommand { get; }
         public ICommand AddConditionCommand { get; }
@@ -137,6 +140,7 @@ namespace FileReader.ViewModels
             // デフォルトの検索条件を1つ追加
             SearchConditions.Add(new SearchCondition());
 
+            AnalysisCommand = new RelayCommand(() => new AnalysisWindow(this) { Owner = Application.Current.MainWindow }.ShowDialog(), () => CanSearch && LogData != null);
             SearchCommand = new RelayCommand(ExecuteSearch, () => CanSearch);
             CancelImportCommand = new RelayCommand(CancelImport, () => IsImporting);
             AddConditionCommand = new RelayCommand(AddCondition, () => CanSearch);
